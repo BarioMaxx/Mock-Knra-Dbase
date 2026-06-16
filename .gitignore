@@ -1,2 +1,11 @@
 .env
 .env.local
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local SQLite database (auto-generated)
+*.db
