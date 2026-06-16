@@ -3,12 +3,13 @@ KNRA Licensing Database API
 Flask REST API for radioactive equipment and facility licensing system
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import mysql.connector
 from mysql.connector import Error
 from datetime import datetime, timedelta
 import os
+import json
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -22,7 +23,8 @@ DB_CONFIG = {
     'host': os.getenv('DB_HOST', 'localhost'),
     'user': os.getenv('DB_USER', 'root'),
     'password': os.getenv('DB_PASSWORD', 'root'),
-    'database': os.getenv('DB_NAME', 'knra_licensing_db')
+    'database': os.getenv('DB_NAME', 'knra_licensing_db'),
+    'connection_timeout': int(os.getenv('DB_CONNECTION_TIMEOUT', '5'))
 }
 
 # ============================================================================
@@ -79,6 +81,60 @@ def execute_insert_update(query, params=None):
     finally:
         conn.close()
 
+def sample_dashboard_records():
+    """Fallback records for a useful demo page when the database is unavailable."""
+    return {
+        'facilities': [
+            {
+                'id': 1,
+                'hospital_name': 'Kenyatta National Hospital',
+                'location': 'Nairobi',
+                'facility_class': 'Class II',
+                'equipment_classes': ['CT Scanner', 'X-ray', 'Radiotherapy'],
+                'status': 'active'
+            },
+            {
+                'id': 2,
+                'hospital_name': 'Aga Khan University Hospital',
+                'location': 'Nairobi',
+                'facility_class': 'Class I',
+                'equipment_classes': ['Radiotherapy', 'Nuclear Medicine', 'Diagnostic Imaging'],
+                'status': 'active'
+            },
+            {
+                'id': 3,
+                'hospital_name': 'Mombasa Hospital',
+                'location': 'Mombasa',
+                'facility_class': 'Class III',
+                'equipment_classes': ['X-ray', 'CT Scanner'],
+                'status': 'active'
+            }
+        ],
+        'licenses': [
+            {
+                'id': 1,
+                'license_number': 'KNRA-2023-000001',
+                'hospital_name': 'Kenyatta National Hospital',
+                'issue_date': '2023-01-15',
+                'expiry_date': '2027-01-14',
+                'status': 'active',
+                'fee_paid': True,
+                'fee_amount': 250000
+            },
+            {
+                'id': 2,
+                'license_number': 'KNRA-2024-000015',
+                'hospital_name': 'Aga Khan University Hospital',
+                'issue_date': '2024-02-01',
+                'expiry_date': '2028-01-31',
+                'status': 'active',
+                'fee_paid': True,
+                'fee_amount': 350000
+            }
+        ],
+        'source': 'sample'
+    }
+
 # ============================================================================
 # HEALTH CHECK
 # ============================================================================
@@ -98,6 +154,44 @@ def health_check():
         'status': 'unhealthy',
         'database': 'disconnected'
     }), 500
+
+@app.route('/api/dashboard-records', methods=['GET'])
+def get_dashboard_records():
+    """Get the compact records needed by the React dashboard."""
+    facilities_query = """
+        SELECT id, hospital_name, location, facility_class, equipment_classes, status
+        FROM facilities
+        ORDER BY hospital_name
+    """
+    licenses_query = """
+        SELECT l.id, l.license_number, f.hospital_name, l.issue_date, l.expiry_date,
+               l.status, l.fee_paid, l.fee_amount
+        FROM licenses l
+        JOIN facilities f ON l.facility_id = f.id
+        ORDER BY l.expiry_date ASC
+    """
+
+    facilities = execute_query(facilities_query)
+    licenses = execute_query(licenses_query)
+
+    if facilities is None or licenses is None:
+        fallback = sample_dashboard_records()
+        fallback['notice'] = 'Database unavailable; showing sample records.'
+        return jsonify(fallback), 200
+
+    for facility in facilities:
+        equipment_classes = facility.get('equipment_classes')
+        if isinstance(equipment_classes, str):
+            try:
+                facility['equipment_classes'] = json.loads(equipment_classes)
+            except json.JSONDecodeError:
+                facility['equipment_classes'] = []
+
+    return jsonify({
+        'facilities': facilities,
+        'licenses': licenses,
+        'source': 'database'
+    }), 200
 
 # ============================================================================
 # FACILITIES ENDPOINTS
@@ -480,6 +574,34 @@ def get_kpis():
         results[key] = data[0]['count'] if data else 0
     
     return jsonify(results), 200
+
+# ============================================================================
+# FRONTEND
+# ============================================================================
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_react_app(path):
+    """Serve the built React app and keep API 404s as JSON."""
+    if path.startswith('api/'):
+        return jsonify({'error': 'Endpoint not found'}), 404
+
+    dist_dir = os.path.join(os.path.dirname(__file__), 'dist')
+    requested_file = os.path.join(dist_dir, path)
+
+    if path and os.path.exists(requested_file):
+        return send_from_directory(dist_dir, path)
+
+    index_file = os.path.join(dist_dir, 'index.html')
+    if os.path.exists(index_file):
+        return send_from_directory(dist_dir, 'index.html')
+
+    return jsonify({
+        'message': 'KNRA Licensing Database API',
+        'frontend': 'Run npm install && npm run build to generate the React site.',
+        'health': '/health',
+        'records': '/api/dashboard-records'
+    }), 200
 
 # ============================================================================
 # ERROR HANDLERS
